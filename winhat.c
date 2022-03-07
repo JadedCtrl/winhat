@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <libc.h>
 #include <draw.h>
+#include <thread.h>
+#include <mouse.h>
+#include <keyboard.h>
 
 #include "winhat.h"
 
@@ -26,7 +29,7 @@ enum {
 
 
 void
-main(int argc, char* argv[])
+threadmain(int argc, char* argv[])
 {
 	ARGBEGIN{
 		default:
@@ -34,18 +37,68 @@ main(int argc, char* argv[])
 	} ARGEND;
 	
 	int winid = 0;
-	if (argc == 1)
-		winid = atoi(argv[0]);
-	if (winid <= 0)
+	if (argc != 1 || (argc == 1 && (winid = atoi(argv[0])) == 0))
 		usage();
 
-/*	if(initdraw(nil, nil, argv0) < 0)
+    Mousectl* mctl;
+    Keyboardctl* kctl;
+    if((mctl = initmouse(nil, screen)) == nil)
+        sysfatal("%s: %r", argv0);
+    if((kctl = initkeyboard(nil)) == nil)
+        sysfatal("%s: %r", argv0);
+	if(initdraw(nil, nil, argv0) < 0)
 		sysfatal("%s: %r", argv0);
-	draw_own_window();
-	sleep(30000); */
 
-	monitor_window(winid);
-	exits(0);
+    Rune kbd;
+    Mouse mouse;
+    int resize[2];
+    enum{ MOUSE, RESIZE, KEYBD, NONE };
+    Alt alts[4] = {
+        {mctl->c, &mouse, CHANRCV},
+        {mctl->resizec, &resize, CHANRCV},
+        {kctl->c, &kbd, CHANRCV},
+        {nil, nil, CHANNOBLK}
+    };
+
+	char path[70];
+	int len = wctl_path(winid, path);
+	if(len <= 0)
+		sysfatal("Weird path error?");
+	int rect[4] = {0,0,0,0};
+	int focus = W_NOTCURRENT;
+
+    draw_own_window(focus);
+
+	int live = 1;
+    while(live == 1){
+        switch(alt(alts)){
+            case RESIZE: 
+                draw_own_window(focus);
+                break;
+            case MOUSE:  
+				if(mouse.buttons == 2){
+					kill_window(path);
+				}else if(mouse.buttons == 4){
+					hide_window(path);
+					hide_window("/mnt/wsys/wctl");
+				}
+                break;
+            case KEYBD:  
+                if(kbd == 'q')
+					live = 0;
+				break;
+            case NONE:  
+                monitor_window(path, rect, &focus);
+				sleep(100);
+                break;
+            default:
+                sysfatal("This... shouldn't happen. No event.");
+                break;
+        }
+    }
+	closekeyboard(kctl);
+	closemouse(mctl);
+	threadexitsall(nil);
 }
 
 void
@@ -57,29 +110,24 @@ usage(void)
 
 /* You will comply! YOU WILL COMPLY! */
 void
-monitor_window(int winId)
+monitor_window(const char* path, int rect[4], int* focus)
 {
-	char path[70];
-	int len = wctl_path(winId, path);
-	if(len <= 0)
-		sysfatal("Weird path error?");
-
-	int status = 0;
-	int rect[4] = {0,0,0,0};
-	int focus = -2;
-
-	while((status = check_window(path, rect, &focus)) != -2) {
-		if(status & W_FOCUS_CHANGED) {
-		}
-		if(status & W_RECT_CHANGED) {
-			if(resize_own_window(rect) == -1) {
-				rect[0] = 0; rect[1] = 0;
-				rect[2] = 0; rect[3] = 0;
-			}else
-				focus_window(path);
-		}
-		sleep(100);
+	int status = check_window(path, rect, focus);
+    if(status == -2) {
+		kill_window("/mnt/wsys/wctl");
+		exits(0);
 	}
+    
+    if(status & W_FOCUS_CHANGED) {
+		draw_own_window(*focus);
+    }
+    if(status & W_RECT_CHANGED) {
+        if(resize_own_window(rect) == -1) {
+            rect[0] = 0; rect[1] = 0;
+            rect[2] = 0; rect[3] = 0;
+        }else
+            focus_window(path);
+    }
 }
 
 /* Checks if the window's position or focus has changed
@@ -124,6 +172,26 @@ focus_window(const char* path)
 	}
 }
 
+void
+kill_window(const char* path)
+{
+	int wctl_fd = open(path, OWRITE);
+	if(wctl_fd >= 0) {
+		fprint(wctl_fd, "delete\n");
+		close(wctl_fd);
+	}
+}
+
+void
+hide_window(const char* path)
+{
+	int wctl_fd = open(path, OWRITE);
+	if(wctl_fd >= 0) {
+		fprint(wctl_fd, "hide\n");
+		close(wctl_fd);
+	}
+}
+
 int
 resize_own_window(int rect[4])
 {
@@ -138,21 +206,27 @@ resize_own_window(int rect[4])
 	fprint(wctl_fd, "resize -r %d %d %d %d\n",
 		rect[LEFT], rect[TOP] - 20, rect[RIGHT], rect[TOP]+20);
 	close(wctl_fd);
-	
-	draw_own_window();
 	return 0;
 }
 
 void
-draw_own_window(void)
+draw_own_window(int focus)
 {
-	Image* img = allocimage(display, Rect(0, 0, 100, 100), RGB24, 1,
-		DGreygreen);
-		// DGreygreen active, DGreyblue inactive
-	if(img == nil)
+    if(getwindow(display, Refnone) < 0)
+        sysfatal("%s: %r", argv0);
+
+	int bg_color = DGreygreen;
+	if (focus == W_NOTCURRENT)
+		bg_color = DPalegreygreen;
+
+	Image* bg = allocimage(display, Rect(0, 0, 1, 1), RGB24, 1, bg_color);
+
+	if(bg == nil)
 		sysfatal("Couldn't make an Image-- you doing alright, friend?");
-	draw(screen, screen->r, img, nil, ZP);
-	freeimage(img);
+
+	draw(screen, screen->r, bg, nil, ZP);
+
+	freeimage(bg);
 	flushimage(display, Refnone);
 }
 
