@@ -5,6 +5,7 @@
 #include <thread.h>
 #include <mouse.h>
 #include <keyboard.h>
+#include <control.h>
 
 #include "winhat.h"
 
@@ -28,6 +29,35 @@ enum {
 };
 
 
+Controlset* ctrls;
+int ctldeletequits = 1;
+
+void
+resizecontrolset(Controlset*)
+{
+	if(getwindow(display, Refnone) < 0)
+		sysfatal("resize failed: %r");
+
+	Image* bg = allocimage(display, Rect(0, 0, 1, 1), RGB24, 1, DPalegreygreen);
+	draw(screen, screen->r, bg, nil, ZP);
+	freeimage(bg);
+
+	Rectangle rect = insetrect(screen->r, 10); //Rect(5, 5, 45, 45);
+	chanprint(ctrls->ctl, "exitbutton rect %R\nexitbutton show", rect);
+}
+
+void
+init_controls(Channel* ctrl_chan)
+{
+	Control* exitbutton = createbutton(ctrls, "exitbutton");
+	chanprint(ctrls->ctl, "exitbutton image red");
+	chanprint(ctrls->ctl, "exitbutton mask darkgreen");
+	controlwire(exitbutton, "event", ctrl_chan);
+	activate(exitbutton);
+
+	resizecontrolset(ctrls);
+}
+
 void
 threadmain(int argc, char* argv[])
 {
@@ -40,24 +70,20 @@ threadmain(int argc, char* argv[])
 	if (argc != 1 || (argc == 1 && (winid = atoi(argv[0])) == 0))
 		usage();
 
-    Mousectl* mctl;
-    Keyboardctl* kctl;
-    if((mctl = initmouse(nil, screen)) == nil)
-        sysfatal("%s: %r", argv0);
-    if((kctl = initkeyboard(nil)) == nil)
-        sysfatal("%s: %r", argv0);
 	if(initdraw(nil, nil, argv0) < 0)
 		sysfatal("%s: %r", argv0);
 
-    Rune kbd;
-    Mouse mouse;
-    int resize[2];
-    enum{ MOUSE, RESIZE, KEYBD, NONE };
+	initcontrols();
+	ctrls = newcontrolset(screen, nil, nil, nil);
+	Channel* ctrl_chan = chancreate(sizeof(char*), 0);
+	init_controls(ctrl_chan);
+
+	char* ctrl_msg;
+	char* ctrl_args[3];
+    enum{ CONTROL, NONE };
     Alt alts[4] = {
-        {mctl->c, &mouse, CHANRCV},
-        {mctl->resizec, &resize, CHANRCV},
-        {kctl->c, &kbd, CHANRCV},
-        {nil, nil, CHANNOBLK}
+        {ctrl_chan, &ctrl_msg, CHANRCV},
+        {nil, nil, CHANEND}
     };
 
 	char path[70];
@@ -67,37 +93,29 @@ threadmain(int argc, char* argv[])
 	int rect[4] = {0,0,0,0};
 	int focus = W_NOTCURRENT;
 
-    draw_own_window(focus);
+	long delay = 1000;
 
-	int live = 1;
-    while(live == 1){
-        switch(alt(alts)){
-            case RESIZE: 
-                draw_own_window(focus);
-                break;
-            case MOUSE:  
-				if(mouse.buttons == 2){
-					kill_window(path);
-				}else if(mouse.buttons == 4){
-					hide_window(path);
-					hide_window("/mnt/wsys/wctl");
+	for(;;){
+		switch(alt(alts)){
+			case CONTROL: {
+				int n = tokenize(ctrl_msg, ctrl_args, nelem(ctrl_args));
+				if(strcmp(ctrl_args[0], "exitbutton:") == 0)
+					threadexitsall(nil);
+				break;
+			}
+            case NONE: {
+				if(delay <= 0) {
+	                monitor_window(path, rect, &focus);
+					delay = 1000;
 				}
                 break;
-            case KEYBD:  
-                if(kbd == 'q')
-					live = 0;
-				break;
-            case NONE:  
-                monitor_window(path, rect, &focus);
-				sleep(100);
-                break;
+			}
             default:
+				threadexitsall(nil);
                 sysfatal("This... shouldn't happen. No event.");
                 break;
         }
     }
-	closekeyboard(kctl);
-	closemouse(mctl);
 	threadexitsall(nil);
 }
 
@@ -119,7 +137,7 @@ monitor_window(const char* path, int rect[4], int* focus)
 	}
     
     if(status & W_FOCUS_CHANGED) {
-		draw_own_window(*focus);
+		//draw_own_window(*focus);
     }
     if(status & W_RECT_CHANGED) {
         if(resize_own_window(rect) == -1) {
